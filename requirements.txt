@@ -1,3 +1,4 @@
-streamlit>=1.36
+streamlit>=1.40
 pandas
+numpy
 psycopg2-binary

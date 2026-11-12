@@ -1,4 +1,5 @@
 """MindGym — mental maths & memory trainer (Streamlit)."""
+import os
 import random
 import time
 
@@ -6,9 +7,24 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
+import growth as G
 import logic as L
+from db import Store
 
 st.set_page_config(page_title="MindGym", page_icon="🧠", layout="centered")
+
+
+@st.cache_resource
+def get_store():
+    url = None
+    try:
+        url = st.secrets.get("DATABASE_URL")
+    except Exception:
+        pass
+    return Store(url or os.environ.get("DATABASE_URL"))
+
+
+store = get_store()
 
 # ---------------------------------------------------------------- style
 st.markdown(
@@ -59,6 +75,7 @@ defaults = dict(
     drill=None,          # active drill config
     q=None, q_start=0.0, feedback=None, streak=0, best_streak=0,
     mem_phase="idle", mem_seq="", mem_len=5, mem_result=None,
+    user=None,
 )
 for k, v in defaults.items():
     ss.setdefault(k, v)
@@ -68,14 +85,65 @@ with st.sidebar:
     st.title("🧠 MindGym")
     page = st.radio("Go to", ["🔢 Math Drills", "🧩 Memory", "📈 Progress"], label_visibility="collapsed")
     st.divider()
+
+    if ss.user:
+        st.markdown(f"👤 **{ss.user['username']}**")
+        if st.button("Log out", use_container_width=True):
+            for k in ("user", "history", "mem_history", "drill", "q", "feedback", "mem_result"):
+                ss[k] = defaults[k]
+            ss.streak = ss.best_streak = 0
+            st.rerun()
+    else:
+        st.markdown("**Save your progress**")
+        st.caption("Make a free account to track your growth over weeks and months.")
+        t_login, t_signup = st.tabs(["Log in", "Sign up"])
+        with t_login:
+            with st.form("login"):
+                u = st.text_input("Username", key="li_u")
+                p = st.text_input("Password", type="password", key="li_p")
+                if st.form_submit_button("Log in", type="primary", use_container_width=True):
+                    user = store.login(u, p)
+                    if user:
+                        ss.user = user
+                        st.rerun()
+                    else:
+                        st.error("Wrong username or password.")
+        with t_signup:
+            with st.form("signup"):
+                u = st.text_input("Choose a username", key="su_u")
+                p = st.text_input("Password (6+ characters)", type="password", key="su_p")
+                p2 = st.text_input("Repeat password", type="password", key="su_p2")
+                if st.form_submit_button("Create account", type="primary", use_container_width=True):
+                    if p != p2:
+                        st.error("Passwords don't match.")
+                    else:
+                        user, err = store.create_user(u, p)
+                        if err:
+                            st.error(err)
+                        else:
+                            ss.user = user
+                            # keep anything practised as a guest this session
+                            for h in ss.history:
+                                store.add_math(user["id"], h["category"], h["level"], h["question"], h["answer"],
+                                               h["given"], h["correct"], h["seconds"])
+                            for m in ss.mem_history:
+                                store.add_memory(user["id"], m["length"], m["direction"], m["style"],
+                                                 m["correct"], m["digits_right"])
+                            st.rerun()
+        st.caption("Playing as guest — progress is lost when you close the tab.")
+
+    st.divider()
     total = len(ss.history)
     acc = (sum(h["correct"] for h in ss.history) / total * 100) if total else 0
-    st.metric("Questions today", total)
-    st.metric("Accuracy", f"{acc:.0f}%")
-    st.metric("Best streak", ss.best_streak)
+    st.caption("THIS SESSION")
+    c1, c2 = st.columns(2)
+    c1.metric("Questions", total)
+    c2.metric("Accuracy", f"{acc:.0f}%")
     best_span = max([m["length"] for m in ss.mem_history if m["correct"]], default=0)
-    st.metric("Best digit span", best_span)
-    st.caption("Progress is kept for this browser session. Download it from 📈 Progress.")
+    c1.metric("Best streak", ss.best_streak)
+    c2.metric("Digit span", best_span)
+    if not store.permanent:
+        st.caption("⚠️ Storage: temporary database (resets when the app restarts).")
 
 
 # ================================================================ MATH
@@ -206,6 +274,10 @@ def math_page():
                                question=q["prompt"], answer=L.show_answer(q),
                                given=ans if not skipped else "(skipped)",
                                correct=ok, seconds=round(elapsed, 2)))
+        if ss.user:
+            h = ss.history[-1]
+            store.add_math(ss.user["id"], h["category"], h["level"], h["question"], h["answer"],
+                           h["given"], ok, h["seconds"])
         if ok:
             ss.feedback = (True, f"✅ {q['prompt']} = <b>{L.show_answer(q)}</b> · {elapsed:.1f}s")
         else:
@@ -316,6 +388,8 @@ def memory_page():
             ss.mem_history.append(dict(time=pd.Timestamp.now(), length=len(seq), direction=cfg["direction"],
                                        style=cfg["style"], correct=correct,
                                        digits_right=n_ok, sequence=seq, attempt=clean))
+            if ss.user:
+                store.add_memory(ss.user["id"], len(seq), cfg["direction"], cfg["style"], correct, n_ok)
             ss.mem_result = dict(correct=correct, marks=marks, target=target, attempt=clean,
                                  n_ok=n_ok, length=len(seq))
             if cfg["length_mode"] == "Adaptive":
@@ -338,6 +412,143 @@ def show_mem_result():
 # ================================================================ PROGRESS
 def progress_page():
     st.header("📈 Progress")
+    if ss.user:
+        growth_page()
+        return
+    st.info("You're playing as a guest, so only this session is shown. **Sign up in the sidebar** "
+            "(it's free) to track your growth over weeks and months — anything you've done this session is kept.")
+    session_progress()
+
+
+RANGES = {"Last 7 days": 7, "Last 30 days": 30, "Last 90 days": 90, "All time": None}
+
+
+def growth_page():
+    uid = ss.user["id"]
+    mdf = G.with_day(store.math_df(uid))
+    memdf = G.with_day(store.memory_df(uid))
+    if not len(mdf) and not len(memdf):
+        st.info("No practice saved yet. Play a round of Math Drills or Memory — every answer is saved to your account.")
+        return
+
+    goal = int(ss.user.get("daily_goal") or 30)
+    all_days = (set(mdf["day"]) if len(mdf) else set()) | (set(memdf["day"]) if len(memdf) else set())
+    cur_streak, best_streak = G.streaks(all_days)
+    today = G.today()
+    done_today = int((mdf["day"] == today).sum()) if len(mdf) else 0
+
+    # ---- top line
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("🔥 Day streak", cur_streak, help=f"Longest ever: {best_streak} days")
+    c2.metric("Days practised", len(all_days))
+    c3.metric("Total questions", len(mdf))
+    c4.metric("Best digit span", int(memdf[memdf.correct]["length"].max()) if len(memdf) and memdf.correct.any() else 0)
+
+    # ---- daily goal
+    gc1, gc2 = st.columns([3, 1])
+    gc1.markdown(f"**Today's goal:** {done_today} / {goal} questions")
+    gc1.progress(min(1.0, done_today / goal))
+    new_goal = gc2.number_input("Daily goal", 5, 500, goal, 5, label_visibility="collapsed",
+                                help="Questions per day")
+    if new_goal != goal:
+        store.set_goal(uid, new_goal)
+        ss.user["daily_goal"] = new_goal
+        st.rerun()
+
+    # ---- calendar
+    st.subheader("Practice calendar")
+    counts = mdf.groupby("day").size().to_dict() if len(mdf) else {}
+    st.markdown(G.heatmap_html(counts, days=91, goal=goal), unsafe_allow_html=True)
+
+    # ---- trends
+    st.subheader("Trends")
+    rng = st.radio("Period", list(RANGES), index=1, horizontal=True, label_visibility="collapsed")
+    days = RANGES[rng]
+    m = G.in_range(mdf, days)
+    mem = G.in_range(memdf, days)
+
+    cats = ["All categories"] + sorted(m["category"].unique()) if len(m) else ["All categories"]
+    cat = st.selectbox("Category", cats)
+    mm = m if cat == "All categories" else m[m.category == cat]
+    daily = G.daily_math(mm)
+
+    if len(daily):
+        k1, k2, k3 = st.columns(3)
+        k1.metric("Questions", int(daily["questions"].sum()))
+        k2.metric("Accuracy", f"{mm.correct.mean() * 100:.0f}%")
+        sp = mm[mm.correct]["seconds"].mean()
+        k3.metric("Avg time (correct)", f"{sp:.1f}s" if pd.notna(sp) else "–")
+
+        t1, t2, t3 = st.tabs(["⚡ Speed", "🎯 Accuracy", "📊 Volume"])
+        with t1:
+            st.caption("Average seconds per correct answer, per day — going **down** means you're getting faster.")
+            st.line_chart(daily["avg_seconds"], height=240, y_label="seconds")
+        with t2:
+            st.caption("Percent correct per day.")
+            st.line_chart(daily["accuracy"], height=240, y_label="% correct")
+        with t3:
+            st.caption("Questions answered per day.")
+            st.bar_chart(daily["questions"], height=240, y_label="questions")
+    else:
+        st.caption("No math practice in this period.")
+
+    # ---- then vs now
+    st.subheader("How much have you improved?")
+    tvn = G.then_vs_now(m)
+    if len(tvn):
+        st.caption(f"Your first 30% of attempts vs your latest 30% ({rng.lower()}), "
+                   "for every type you've done at least 10 times.")
+        show = pd.DataFrame({
+            "Type": tvn["category"] + " · " + tvn["level"],
+            "Attempts": tvn["attempts"],
+            "Accuracy then → now": tvn["acc_then"].astype(str) + "% → " + tvn["acc_now"].astype(str) + "%",
+            "Time then → now": tvn["sec_then"].map(lambda x: f"{x}s" if pd.notna(x) else "–") + " → "
+                               + tvn["sec_now"].map(lambda x: f"{x}s" if pd.notna(x) else "–"),
+            "Faster by": tvn["speed_change_%"].map(lambda x: f"{x:+.0f}%" if pd.notna(x) else "–"),
+        })
+        st.dataframe(show, hide_index=True, use_container_width=True)
+        best = tvn.dropna(subset=["speed_change_%"]).sort_values("speed_change_%", ascending=False)
+        if len(best) and best.iloc[0]["speed_change_%"] > 0:
+            b = best.iloc[0]
+            st.success(f"Biggest gain: **{b['category']} ({b['level']})** — {b['sec_then']}s → {b['sec_now']}s "
+                       f"per question ({b['speed_change_%']:.0f}% faster).")
+    else:
+        st.caption("Do at least 10 questions of a type in this period to see your before/after comparison.")
+
+    # ---- weak spots
+    if len(m) >= 10:
+        by = (m.groupby(["category", "level"])
+                .agg(n=("correct", "size"), acc=("correct", "mean")).reset_index())
+        by = by[by.n >= 5].sort_values("acc")
+        if len(by) and by.iloc[0]["acc"] < 0.9:
+            w = by.iloc[0]
+            st.warning(f"Weakest spot: **{w['category']} ({w['level']})** at {w['acc'] * 100:.0f}% accuracy. "
+                       f"Try a focused round on it.")
+
+    # ---- memory
+    st.subheader("Memory")
+    dm = G.daily_memory(mem)
+    if len(dm):
+        a1, a2, a3 = st.columns(3)
+        a1.metric("Attempts", len(mem))
+        a2.metric("Perfect recalls", int(mem.correct.sum()))
+        a3.metric("Best span (period)", int(mem[mem.correct]["length"].max()) if mem.correct.any() else 0)
+        st.caption("Longest sequence recalled perfectly each day.")
+        st.line_chart(dm["best_span"], height=200, y_label="digits")
+    else:
+        st.caption("No memory practice in this period.")
+
+    # ---- export
+    with st.expander("⬇ Export my data"):
+        if len(mdf):
+            st.download_button("Math history (CSV)", mdf.drop(columns=["user_id"]).to_csv(index=False),
+                               "mindgym_math.csv", "text/csv")
+        if len(memdf):
+            st.download_button("Memory history (CSV)", memdf.drop(columns=["user_id"]).to_csv(index=False),
+                               "mindgym_memory.csv", "text/csv")
+
+
+def session_progress():
     if not ss.history and not ss.mem_history:
         st.info("Play a round of Math Drills or Memory and your stats will show up here.")
         return

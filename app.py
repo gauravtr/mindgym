@@ -7,6 +7,7 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
+import analytics as A
 import growth as G
 import logic as L
 from db import Store
@@ -128,7 +129,8 @@ with st.sidebar:
                                                h["given"], h["correct"], h["seconds"])
                             for m in ss.mem_history:
                                 store.add_memory(user["id"], m["length"], m["direction"], m["style"],
-                                                 m["correct"], m["digits_right"])
+                                                 m["correct"], m["digits_right"], m.get("target"),
+                                                 m.get("attempt"))
                             st.rerun()
         st.caption("Playing as guest — progress is lost when you close the tab.")
 
@@ -387,9 +389,10 @@ def memory_page():
             correct = clean == target
             ss.mem_history.append(dict(time=pd.Timestamp.now(), length=len(seq), direction=cfg["direction"],
                                        style=cfg["style"], correct=correct,
-                                       digits_right=n_ok, sequence=seq, attempt=clean))
+                                       digits_right=n_ok, sequence=seq, target=target, attempt=clean))
             if ss.user:
-                store.add_memory(ss.user["id"], len(seq), cfg["direction"], cfg["style"], correct, n_ok)
+                store.add_memory(ss.user["id"], len(seq), cfg["direction"], cfg["style"], correct, n_ok,
+                                 target, clean)
             ss.mem_result = dict(correct=correct, marks=marks, target=target, attempt=clean,
                                  n_ok=n_ok, length=len(seq))
             if cfg["length_mode"] == "Adaptive":
@@ -425,126 +428,271 @@ RANGES = {"Last 7 days": 7, "Last 30 days": 30, "Last 90 days": 90, "All time": 
 
 def growth_page():
     uid = ss.user["id"]
-    mdf = G.with_day(store.math_df(uid))
-    memdf = G.with_day(store.memory_df(uid))
-    if not len(mdf) and not len(memdf):
-        st.info("No practice saved yet. Play a round of Math Drills or Memory — every answer is saved to your account.")
+    raw = store.math_df(uid)
+    mdf_all = A.prepare_math(G.with_day(raw)) if len(raw) else raw
+    memdf_all = G.with_day(store.memory_df(uid))
+    if not len(mdf_all) and not len(memdf_all):
+        st.info("No practice saved yet. Play a round of Math Drills or Memory — every answer is saved "
+                "to your account and analysed here.")
         return
 
-    goal = int(ss.user.get("daily_goal") or 30)
-    all_days = (set(mdf["day"]) if len(mdf) else set()) | (set(memdf["day"]) if len(memdf) else set())
+    # ---------------- controls
+    c1, c2 = st.columns([2, 3])
+    rng = c1.selectbox("Period", list(RANGES), index=1)
+    days = RANGES[rng]
+    skills_all = sorted(mdf_all["category"].unique()) if len(mdf_all) else []
+    pick = c2.multiselect("Skills", skills_all, placeholder="All skills")
+    mdf = mdf_all[mdf_all.category.isin(pick)] if pick and len(mdf_all) else mdf_all
+    m_cur, m_prev = A.periods(mdf, days) if len(mdf) else (mdf, None)
+    mem = G.in_range(memdf_all, days) if len(memdf_all) else memdf_all
+
+    k = A.kpis(m_cur) if len(mdf) else A.kpis(None)
+    kp = A.kpis(m_prev) if m_prev is not None and len(m_prev) else None
+    all_days = (set(mdf_all["day"]) if len(mdf_all) else set()) | (set(memdf_all["day"]) if len(memdf_all) else set())
     cur_streak, best_streak = G.streaks(all_days)
-    today = G.today()
-    done_today = int((mdf["day"] == today).sum()) if len(mdf) else 0
 
-    # ---- top line
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("🔥 Day streak", cur_streak, help=f"Longest ever: {best_streak} days")
-    c2.metric("Days practised", len(all_days))
-    c3.metric("Total questions", len(mdf))
-    c4.metric("Best digit span", int(memdf[memdf.correct]["length"].max()) if len(memdf) and memdf.correct.any() else 0)
+    # ---------------- headline KPIs (vs previous period of equal length)
+    st.caption(f"{rng}" + (" · compared with the previous period of the same length" if kp else ""))
+    r = st.columns(6)
+    r[0].metric("Questions", k["questions"], A.delta(k, kp, "questions", "{:+.0f}"))
+    r[1].metric("Accuracy", f"{k['accuracy']:.1f}%" if k["accuracy"] is not None else "–",
+                (A.delta(k, kp, "accuracy", "{:+.1f} pts")))
+    r[2].metric("Median time", f"{k['median_s']:.2f}s" if k["median_s"] else "–",
+                A.delta(k, kp, "median_s", "{:+.2f}s"), delta_color="inverse",
+                help="Median seconds per correct answer")
+    r[3].metric("Correct / min", f"{k['fluency']:.2f}" if k["fluency"] else "–",
+                A.delta(k, kp, "fluency", "{:+.2f}"), help="Fluency: correct answers per minute of thinking time")
+    r[4].metric("Active days", k["days"], A.delta(k, kp, "days", "{:+.0f}"))
+    r[5].metric("🔥 Streak", f"{cur_streak}d", help=f"Longest ever: {best_streak} days")
 
-    # ---- daily goal
-    gc1, gc2 = st.columns([3, 1])
-    gc1.markdown(f"**Today's goal:** {done_today} / {goal} questions")
-    gc1.progress(min(1.0, done_today / goal))
-    new_goal = gc2.number_input("Daily goal", 5, 500, goal, 5, label_visibility="collapsed",
-                                help="Questions per day")
+    # ---------------- daily goal
+    goal = int(ss.user.get("daily_goal") or 30)
+    done_today = int((mdf_all["day"] == G.today()).sum()) if len(mdf_all) else 0
+    g1, g2 = st.columns([4, 1])
+    g1.progress(min(1.0, done_today / goal), text=f"Today's goal: {done_today} / {goal} questions")
+    new_goal = g2.number_input("Daily goal", 5, 500, goal, 5, label_visibility="collapsed", help="Questions per day")
     if new_goal != goal:
         store.set_goal(uid, new_goal)
         ss.user["daily_goal"] = new_goal
         st.rerun()
 
-    # ---- calendar
-    st.subheader("Practice calendar")
-    counts = mdf.groupby("day").size().to_dict() if len(mdf) else {}
-    st.markdown(G.heatmap_html(counts, days=91, goal=goal), unsafe_allow_html=True)
+    tbl = A.skill_table(m_cur) if len(m_cur) else pd.DataFrame()
+    notes = A.insights(m_cur if len(m_cur) else None, mem, tbl)
+    if notes:
+        with st.container(border=True):
+            st.markdown("**🔎 Key insights**")
+            for n in notes:
+                st.markdown(f"- {n}")
 
-    # ---- trends
-    st.subheader("Trends")
-    rng = st.radio("Period", list(RANGES), index=1, horizontal=True, label_visibility="collapsed")
-    days = RANGES[rng]
-    m = G.in_range(mdf, days)
-    mem = G.in_range(memdf, days)
+    tabs = st.tabs(["📊 Overview", "🧠 Skills", "⚡ Speed", "🎯 Accuracy & errors", "🕒 Habits", "🧩 Memory", "🗂 Data"])
 
-    cats = ["All categories"] + sorted(m["category"].unique()) if len(m) else ["All categories"]
-    cat = st.selectbox("Category", cats)
-    mm = m if cat == "All categories" else m[m.category == cat]
-    daily = G.daily_math(mm)
+    # ================= OVERVIEW
+    with tabs[0]:
+        st.markdown("##### Practice calendar · last 13 weeks")
+        counts = mdf_all.groupby("day").size().to_dict() if len(mdf_all) else {}
+        st.markdown(G.heatmap_html(counts, days=91, goal=goal), unsafe_allow_html=True)
+        ds = A.daily_series(m_cur) if len(m_cur) else pd.DataFrame()
+        if len(ds):
+            st.markdown("##### Daily trend")
+            st.caption("Thin line = that day · thick line = 7-day rolling average.")
+            a, b = st.columns(2)
+            with a:
+                st.markdown("**Accuracy %**")
+                st.line_chart(ds[["Accuracy %", "Accuracy % · 7d avg"]], height=220)
+            with b:
+                st.markdown("**Median time per correct answer (s)** — lower is better")
+                st.line_chart(ds[["Median time (s)", "Median time (s) · 7d avg"]], height=220)
+            a, b = st.columns(2)
+            with a:
+                st.markdown("**Fluency (correct / min)**")
+                st.line_chart(ds[["Correct / min", "Correct / min · 7d avg"]], height=200)
+            with b:
+                st.markdown("**Questions per day**")
+                st.bar_chart(ds["Questions"], height=200)
+            st.markdown("##### Week by week")
+            st.dataframe(A.weekly_summary(m_cur), hide_index=True, use_container_width=True)
+        else:
+            st.caption("No math practice in this period.")
 
-    if len(daily):
-        k1, k2, k3 = st.columns(3)
-        k1.metric("Questions", int(daily["questions"].sum()))
-        k2.metric("Accuracy", f"{mm.correct.mean() * 100:.0f}%")
-        sp = mm[mm.correct]["seconds"].mean()
-        k3.metric("Avg time (correct)", f"{sp:.1f}s" if pd.notna(sp) else "–")
+    # ================= SKILLS
+    with tabs[1]:
+        if len(tbl):
+            st.markdown("##### Skill report card")
+            st.caption("**Consistency** = how steady your times are (100 = identical every time). "
+                       "**Speed trend** = change in daily median time per week (negative = getting faster). "
+                       "**Mastered** = ≥90% accuracy, consistency ≥50 and 20+ attempts.")
+            st.dataframe(
+                tbl.drop(columns=["category", "level"]), hide_index=True, use_container_width=True,
+                column_config={
+                    "Accuracy": st.column_config.ProgressColumn("Accuracy", format="%.0f%%", min_value=0, max_value=100),
+                    "Consistency": st.column_config.ProgressColumn("Consistency", format="%d", min_value=0, max_value=100),
+                    "Speed trend %/wk": st.column_config.NumberColumn("Speed trend", format="%+.1f%%/wk"),
+                    "Per min": st.column_config.NumberColumn("Correct/min", format="%.1f"),
+                })
+            strong, weak = A.strengths_weaknesses(tbl)
+            if strong:
+                a, b = st.columns(2)
+                a.success("**Strongest**\n\n" + "\n".join(f"- {s}" for s in strong))
+                b.error("**Focus next**\n\n" + "\n".join(f"- {s}" for s in weak))
 
-        t1, t2, t3 = st.tabs(["⚡ Speed", "🎯 Accuracy", "📊 Volume"])
-        with t1:
-            st.caption("Average seconds per correct answer, per day — going **down** means you're getting faster.")
-            st.line_chart(daily["avg_seconds"], height=240, y_label="seconds")
-        with t2:
-            st.caption("Percent correct per day.")
-            st.line_chart(daily["accuracy"], height=240, y_label="% correct")
-        with t3:
-            st.caption("Questions answered per day.")
-            st.bar_chart(daily["questions"], height=240, y_label="questions")
-    else:
-        st.caption("No math practice in this period.")
+            st.markdown("##### Deep dive into one skill")
+            sk = st.selectbox("Skill", tbl["Skill"].tolist())
+            g = m_cur[m_cur.skill == sk]
+            row = tbl[tbl.Skill == sk].iloc[0]
+            q = st.columns(5)
+            q[0].metric("Attempts", int(row["Attempts"]))
+            q[1].metric("Accuracy", f"{row['Accuracy']:.1f}%")
+            q[2].metric("Median", f"{row['Median (s)']}s" if pd.notna(row["Median (s)"]) else "–")
+            q[3].metric("Personal best", f"{row['Best (s)']}s" if pd.notna(row["Best (s)"]) else "–")
+            q[4].metric("Status", row["Status"].split(" ", 1)[1])
+            dsk = A.daily_series(g)
+            if len(dsk.dropna(subset=["Median time (s)"])) >= 2:
+                st.line_chart(dsk[["Median time (s)", "Median time (s) · 7d avg"]], height=200)
+            tvn = G.then_vs_now(g, min_attempts=10)
+            if len(tvn):
+                t = tvn.iloc[0]
+                st.info(f"First 30% of attempts → latest 30%: accuracy **{t['acc_then']}% → {t['acc_now']}%**, "
+                        f"time **{t['sec_then']}s → {t['sec_now']}s**.")
+            st.caption("Slowest correct answers in this skill — the patterns worth drilling:")
+            slow = g[g.correct].sort_values("seconds", ascending=False).head(5)
+            st.dataframe(slow[["question", "answer", "seconds"]].rename(
+                columns={"question": "Question", "answer": "Answer", "seconds": "Seconds"}),
+                hide_index=True, use_container_width=True)
+        else:
+            st.caption("No math practice in this period.")
 
-    # ---- then vs now
-    st.subheader("How much have you improved?")
-    tvn = G.then_vs_now(m)
-    if len(tvn):
-        st.caption(f"Your first 30% of attempts vs your latest 30% ({rng.lower()}), "
-                   "for every type you've done at least 10 times.")
-        show = pd.DataFrame({
-            "Type": tvn["category"] + " · " + tvn["level"],
-            "Attempts": tvn["attempts"],
-            "Accuracy then → now": tvn["acc_then"].astype(str) + "% → " + tvn["acc_now"].astype(str) + "%",
-            "Time then → now": tvn["sec_then"].map(lambda x: f"{x}s" if pd.notna(x) else "–") + " → "
-                               + tvn["sec_now"].map(lambda x: f"{x}s" if pd.notna(x) else "–"),
-            "Faster by": tvn["speed_change_%"].map(lambda x: f"{x:+.0f}%" if pd.notna(x) else "–"),
-        })
-        st.dataframe(show, hide_index=True, use_container_width=True)
-        best = tvn.dropna(subset=["speed_change_%"]).sort_values("speed_change_%", ascending=False)
-        if len(best) and best.iloc[0]["speed_change_%"] > 0:
-            b = best.iloc[0]
-            st.success(f"Biggest gain: **{b['category']} ({b['level']})** — {b['sec_then']}s → {b['sec_now']}s "
-                       f"per question ({b['speed_change_%']:.0f}% faster).")
-    else:
-        st.caption("Do at least 10 questions of a type in this period to see your before/after comparison.")
+    # ================= SPEED
+    with tabs[2]:
+        if len(m_cur) and m_cur.correct.any():
+            a, b = st.columns(2)
+            with a:
+                st.markdown("##### How long your correct answers take")
+                st.bar_chart(A.speed_distribution(m_cur), height=240)
+            with b:
+                st.markdown("##### Speed vs accuracy")
+                st.caption("Your answers split into four groups by how fast you were.")
+                pace = A.speed_accuracy_by_pace(m_cur)
+                if len(pace):
+                    st.dataframe(pace, hide_index=True, use_container_width=True)
+                    st.bar_chart(pace.set_index("Pace")["Accuracy %"], height=150)
+                else:
+                    st.caption("Needs 20+ answers.")
+            st.markdown("##### Weekly median time by skill")
+            cs = A.category_speed_by_period(m_cur)
+            if len(cs) >= 2:
+                st.line_chart(cs, height=260)
+            elif len(cs):
+                st.dataframe(cs, use_container_width=True)
+            p = st.columns(3)
+            c = m_cur[m_cur.correct]
+            p[0].metric("Fastest answer", f"{c['seconds'].min():.2f}s")
+            p[1].metric("Median", f"{c['seconds'].median():.2f}s")
+            p[2].metric("90th percentile", f"{c['seconds'].quantile(.9):.2f}s",
+                        help="90% of your correct answers are faster than this")
+        else:
+            st.caption("No correct answers in this period yet.")
 
-    # ---- weak spots
-    if len(m) >= 10:
-        by = (m.groupby(["category", "level"])
-                .agg(n=("correct", "size"), acc=("correct", "mean")).reset_index())
-        by = by[by.n >= 5].sort_values("acc")
-        if len(by) and by.iloc[0]["acc"] < 0.9:
-            w = by.iloc[0]
-            st.warning(f"Weakest spot: **{w['category']} ({w['level']})** at {w['acc'] * 100:.0f}% accuracy. "
-                       f"Try a focused round on it.")
+    # ================= ACCURACY & ERRORS
+    with tabs[3]:
+        if len(m_cur):
+            eb = A.error_breakdown(m_cur)
+            e = st.columns(4)
+            wrong = int((~m_cur.correct).sum())
+            e[0].metric("Mistakes", wrong)
+            e[1].metric("Skip rate", f"{k['skip_rate']:.1f}%" if k["skip_rate"] is not None else "–")
+            e[2].metric("Near misses", int(eb.loc["Near miss (≤2%)", "Count"]) if "Near miss (≤2%)" in eb.index else 0,
+                        help="Wrong but within 2% of the answer — method right, arithmetic slip")
+            e[3].metric("Longest correct run", k["best_streak"])
+            if len(eb):
+                a, b = st.columns([3, 2])
+                with a:
+                    st.markdown("##### Types of mistakes")
+                    st.bar_chart(eb["Count"], height=240, horizontal=True)
+                with b:
+                    st.markdown("##### ")
+                    st.dataframe(eb, use_container_width=True)
+                st.caption("**Single-digit slip**: one digit wrong · **Transposed**: two digits swapped · "
+                           "**Place-value**: off by ×10/×100 · **Near miss**: within 2% · "
+                           "**Calculation error**: everything else.")
+                st.markdown("##### Mistakes by skill")
+                st.dataframe(A.error_by_skill(m_cur), use_container_width=True)
+                st.markdown("##### Questions you miss most")
+                st.dataframe(A.most_missed(m_cur), hide_index=True, use_container_width=True)
+            else:
+                st.success("No mistakes in this period. 👏")
+        else:
+            st.caption("No math practice in this period.")
 
-    # ---- memory
-    st.subheader("Memory")
-    dm = G.daily_memory(mem)
-    if len(dm):
-        a1, a2, a3 = st.columns(3)
-        a1.metric("Attempts", len(mem))
-        a2.metric("Perfect recalls", int(mem.correct.sum()))
-        a3.metric("Best span (period)", int(mem[mem.correct]["length"].max()) if mem.correct.any() else 0)
-        st.caption("Longest sequence recalled perfectly each day.")
-        st.line_chart(dm["best_span"], height=200, y_label="digits")
-    else:
-        st.caption("No memory practice in this period.")
+    # ================= HABITS
+    with tabs[4]:
+        if len(m_cur):
+            a, b = st.columns(2)
+            with a:
+                st.markdown("##### Time of day")
+                tod = A.time_of_day(m_cur)
+                st.dataframe(tod, hide_index=True, use_container_width=True)
+                if len(tod):
+                    st.bar_chart(tod.set_index("When")["Accuracy %"], height=180)
+            with b:
+                st.markdown("##### Day of week")
+                wd = A.weekday_profile(m_cur)
+                st.dataframe(wd, hide_index=True, use_container_width=True)
+                if len(wd):
+                    st.bar_chart(wd.set_index("When")["Questions"], height=180)
+            st.markdown("##### Stamina within a session")
+            st.caption("Accuracy and speed as a session goes on — a drop means fatigue.")
+            fat = A.fatigue_curve(m_cur)
+            if len(fat):
+                st.dataframe(fat, hide_index=True, use_container_width=True)
+            st.markdown("##### Sessions")
+            st.caption(f"A new session starts after a {A.SESSION_GAP_MIN}-minute break.")
+            st.dataframe(A.session_stats(m_cur), hide_index=True, use_container_width=True)
+        else:
+            st.caption("No math practice in this period.")
 
-    # ---- export
-    with st.expander("⬇ Export my data"):
-        if len(mdf):
-            st.download_button("Math history (CSV)", mdf.drop(columns=["user_id"]).to_csv(index=False),
-                               "mindgym_math.csv", "text/csv")
-        if len(memdf):
-            st.download_button("Memory history (CSV)", memdf.drop(columns=["user_id"]).to_csv(index=False),
+    # ================= MEMORY
+    with tabs[5]:
+        if len(mem):
+            mk = A.memory_kpis(mem)
+            q = st.columns(5)
+            q[0].metric("Attempts", mk["attempts"])
+            q[1].metric("Perfect recall", f"{mk['success']:.0f}%")
+            q[2].metric("Best span", mk["best_span"])
+            q[3].metric("Reliable span", mk["reliable_span"], help="Longest length you get right ≥75% of the time")
+            q[4].metric("Digit accuracy", f"{mk['digit_accuracy']:.0f}%" if mk["digit_accuracy"] else "–")
+            md = A.memory_daily(mem)
+            if len(md):
+                st.markdown("##### Span over time")
+                st.line_chart(md[["Best span", "Avg length tried"]], height=220)
+            a, b = st.columns(2)
+            with a:
+                st.markdown("##### Success by length")
+                bl = A.memory_by_length(mem)
+                st.bar_chart(bl["Success %"], height=200)
+                st.dataframe(bl, use_container_width=True)
+            with b:
+                st.markdown("##### Where you lose digits")
+                pc = A.memory_position_curve(mem)
+                if len(pc):
+                    st.caption("Accuracy at each part of the sequence (start → end).")
+                    st.bar_chart(pc, height=200)
+                else:
+                    st.caption("Shows up after a few more memory rounds.")
+            st.markdown("##### By display mode")
+            st.dataframe(A.memory_by_mode(mem), hide_index=True, use_container_width=True)
+        else:
+            st.caption("No memory practice in this period.")
+
+    # ================= DATA
+    with tabs[6]:
+        if len(mdf_all):
+            show = mdf_all.copy()
+            show["time"] = show["ts"].dt.tz_convert(G.TZ).dt.strftime("%Y-%m-%d %H:%M:%S")
+            cols = ["time", "category", "level", "question", "answer", "given", "correct", "seconds", "error_type", "session"]
+            st.dataframe(show[cols].iloc[::-1].head(1000), hide_index=True, use_container_width=True)
+            st.download_button("⬇ Math history (CSV)", show[cols].to_csv(index=False), "mindgym_math.csv", "text/csv")
+        if len(memdf_all):
+            st.download_button("⬇ Memory history (CSV)", memdf_all.drop(columns=["user_id"]).to_csv(index=False),
                                "mindgym_memory.csv", "text/csv")
 
 

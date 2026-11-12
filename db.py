@@ -34,7 +34,8 @@ SCHEMA = [
         id {pk},
         user_id INTEGER NOT NULL,
         ts TEXT NOT NULL,
-        length INTEGER, direction TEXT, style TEXT, correct INTEGER, digits_right INTEGER
+        length INTEGER, direction TEXT, style TEXT, correct INTEGER, digits_right INTEGER,
+        target TEXT, attempt TEXT
     )""",
     "CREATE INDEX IF NOT EXISTS ix_math_user ON math_attempts(user_id, ts)",
     "CREATE INDEX IF NOT EXISTS ix_mem_user ON memory_attempts(user_id, ts)",
@@ -56,6 +57,13 @@ class Store:
         with self._conn() as (con, cur):
             for stmt in SCHEMA:
                 cur.execute(stmt.format(pk=pk))
+        # upgrade older databases (columns added later)
+        for col in ("target", "attempt"):
+            try:
+                with self._conn() as (con, cur):
+                    cur.execute(f"ALTER TABLE memory_attempts ADD COLUMN {col} TEXT")
+            except Exception:
+                pass
 
     @property
     def permanent(self):
@@ -129,11 +137,12 @@ class Store:
                                 "correct, seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"),
                         (user_id, _now(), category, level, question, answer, given, int(bool(correct)), float(seconds)))
 
-    def add_memory(self, user_id, length, direction, style, correct, digits_right):
+    def add_memory(self, user_id, length, direction, style, correct, digits_right, target=None, attempt=None):
         with self._conn() as (con, cur):
             cur.execute(self._q("INSERT INTO memory_attempts (user_id, ts, length, direction, style, correct, "
-                                "digits_right) VALUES (?, ?, ?, ?, ?, ?, ?)"),
-                        (user_id, _now(), int(length), direction, style, int(bool(correct)), int(digits_right)))
+                                "digits_right, target, attempt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"),
+                        (user_id, _now(), int(length), direction, style, int(bool(correct)), int(digits_right),
+                         target, attempt))
 
     def _df(self, table, user_id):
         with self._conn() as (con, cur):

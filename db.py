@@ -35,7 +35,8 @@ SCHEMA = [
         user_id INTEGER NOT NULL,
         ts TEXT NOT NULL,
         length INTEGER, direction TEXT, style TEXT, correct INTEGER, digits_right INTEGER,
-        target TEXT, attempt TEXT
+        target TEXT, attempt TEXT, distract INTEGER DEFAULT 0, puzzles_right INTEGER DEFAULT 0,
+        hold_seconds REAL
     )""",
     "CREATE INDEX IF NOT EXISTS ix_math_user ON math_attempts(user_id, ts)",
     "CREATE INDEX IF NOT EXISTS ix_mem_user ON memory_attempts(user_id, ts)",
@@ -58,10 +59,11 @@ class Store:
             for stmt in SCHEMA:
                 cur.execute(stmt.format(pk=pk))
         # upgrade older databases (columns added later)
-        for col in ("target", "attempt"):
+        for col, typ in (("target", "TEXT"), ("attempt", "TEXT"), ("distract", "INTEGER DEFAULT 0"),
+                         ("puzzles_right", "INTEGER DEFAULT 0"), ("hold_seconds", "REAL")):
             try:
                 with self._conn() as (con, cur):
-                    cur.execute(f"ALTER TABLE memory_attempts ADD COLUMN {col} TEXT")
+                    cur.execute(f"ALTER TABLE memory_attempts ADD COLUMN {col} {typ}")
             except Exception:
                 pass
 
@@ -137,12 +139,15 @@ class Store:
                                 "correct, seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"),
                         (user_id, _now(), category, level, question, answer, given, int(bool(correct)), float(seconds)))
 
-    def add_memory(self, user_id, length, direction, style, correct, digits_right, target=None, attempt=None):
+    def add_memory(self, user_id, length, direction, style, correct, digits_right, target=None, attempt=None,
+                   distract=0, puzzles_right=0, hold_seconds=None):
         with self._conn() as (con, cur):
             cur.execute(self._q("INSERT INTO memory_attempts (user_id, ts, length, direction, style, correct, "
-                                "digits_right, target, attempt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"),
+                                "digits_right, target, attempt, distract, puzzles_right, hold_seconds) "
+                                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"),
                         (user_id, _now(), int(length), direction, style, int(bool(correct)), int(digits_right),
-                         target, attempt))
+                         target, attempt, int(distract or 0), int(puzzles_right or 0),
+                         float(hold_seconds) if hold_seconds is not None else None))
 
     def _df(self, table, user_id):
         with self._conn() as (con, cur):

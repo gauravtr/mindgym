@@ -394,6 +394,37 @@ def memory_by_mode(m):
     return g.rename(columns={"style": "Display", "direction": "Recall"})
 
 
+def _dlabel(n):
+    n = int(n or 0)
+    return "No distraction" if n == 0 else ("1–3 puzzles" if n <= 3 else ("4–6 puzzles" if n <= 6 else "7+ puzzles"))
+
+
+def distraction_effect(m):
+    """Recall success with vs without puzzles in between (compared at similar lengths)."""
+    if m is None or not len(m) or "distract" not in m:
+        return pd.DataFrame()
+    d = m.copy()
+    d["distract"] = d["distract"].fillna(0).astype(int)
+    d["Condition"] = d["distract"].map(_dlabel)
+    order = ["No distraction", "1–3 puzzles", "4–6 puzzles", "7+ puzzles"]
+    rows = []
+    for c in order:
+        g = d[d.Condition == c]
+        if not len(g):
+            continue
+        ok = g[g.correct]
+        hold = g["hold_seconds"].dropna() if "hold_seconds" in g else pd.Series(dtype=float)
+        pz = g[g.distract > 0]
+        rows.append({"Condition": c, "Attempts": len(g), "Success %": round(g.correct.mean() * 100, 1),
+                     "Digit accuracy %": round(g["digits_right"].sum() / g["length"].sum() * 100, 1),
+                     "Avg length": round(g["length"].mean(), 1),
+                     "Best span": int(ok["length"].max()) if len(ok) else 0,
+                     "Avg hold (s)": round(hold.mean(), 0) if len(hold) else None,
+                     "Puzzle accuracy %": round(pz["puzzles_right"].sum() / pz["distract"].sum() * 100, 1)
+                     if len(pz) and pz["distract"].sum() else None})
+    return pd.DataFrame(rows)
+
+
 def memory_daily(m):
     if m is None or not len(m):
         return pd.DataFrame()
@@ -452,6 +483,20 @@ def insights(df, m, tbl):
         mk = memory_kpis(m)
         out.append(f"Memory: best perfect recall **{mk['best_span']} digits**; reliable span "
                    f"(≥75% success) **{mk['reliable_span']} digits**.")
+        de = distraction_effect(m)
+        if len(de) >= 2 and "No distraction" in de["Condition"].values:
+            base = de[de.Condition == "No distraction"].iloc[0]
+            oth = de[de.Condition != "No distraction"]
+            oth = oth[oth.Attempts >= 3]
+            if len(oth):
+                w = oth.sort_values("Digit accuracy %").iloc[0]
+                drop = base["Digit accuracy %"] - w["Digit accuracy %"]
+                if drop >= 5:
+                    out.append(f"Distraction costs you **{drop:.0f} points** of digit accuracy "
+                               f"({base['Digit accuracy %']:.0f}% → {w['Digit accuracy %']:.0f}% with {w['Condition']}) — "
+                               "rehearsing the chunks silently between puzzles helps.")
+                elif drop <= 2:
+                    out.append("Your recall barely drops under distraction — strong working-memory resilience.")
         pc = memory_position_curve(m)
         if len(pc) >= 4:
             mid = pc.iloc[len(pc) // 2 - 1: len(pc) // 2 + 1]["Accuracy %"].mean()

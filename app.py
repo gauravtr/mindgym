@@ -55,9 +55,16 @@ header[data-testid="stHeader"]{background:transparent;}
 .brand .logo{width:36px;height:36px;border-radius:11px;background:linear-gradient(135deg,var(--brand),var(--brand-2));
   display:grid;place-items:center;color:#fff;font-size:19px;box-shadow:0 8px 18px -8px rgba(79,70,229,.75);}
 .brand small{display:block;font-size:.72rem;font-weight:500;color:var(--ink-3);letter-spacing:0;margin-top:-2px;}
-.st-key-nav{margin:6px 0 4px;}
-.st-key-nav [data-testid="stButtonGroup"], .st-key-nav [data-testid="stButtonGroup"] > div{width:100%;}
-.st-key-nav button{flex:1 1 0;min-height:2.6rem;font-weight:600;}
+.st-key-nav{margin:6px 0 4px;width:100%!important;}
+.st-key-nav [data-testid="stButtonGroup"]{width:100%;}
+.st-key-nav [role="radiogroup"]{width:100%;max-width:none!important;}
+.st-key-nav button{flex:1 1 0;min-height:2.6rem;font-weight:600;min-width:0;}
+/* keep these rows side by side on phones */
+.st-key-topbar [data-testid="stHorizontalBlock"], .st-key-ansbox [data-testid="stHorizontalBlock"]{flex-wrap:nowrap!important;gap:10px;}
+.st-key-topbar [data-testid="stColumn"], .st-key-ansbox [data-testid="stColumn"]{min-width:0!important;width:auto!important;flex:1 1 0!important;}
+.st-key-topbar [data-testid="stColumn"]:last-child{flex:0 0 auto!important;}
+.st-key-ansbox [data-testid="stColumn"]:first-child{flex:3 1 0!important;}
+@media (max-width:640px){ .st-key-nav button p{font-size:.82rem;} .brand small{display:none;} }
 
 /* ---------- headings */
 .page-head{margin:14px 0 14px;}
@@ -117,6 +124,9 @@ button[data-testid="stBaseButton-primaryFormSubmit"]:hover{transform:translateY(
   font-variant-numeric:tabular-nums;}
 .st-key-recallbox input{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:1.7rem;text-align:center;
   font-weight:700;height:3.7rem;letter-spacing:.25em;}
+.st-key-ansbox input::placeholder, .st-key-recallbox input::placeholder{font-family:'Inter',sans-serif;font-size:1rem;
+  font-weight:500;letter-spacing:0;color:#a3acc0;}
+.st-key-ansbox [data-testid="InputInstructions"], .st-key-recallbox [data-testid="InputInstructions"]{display:none;}
 .fb{display:flex;gap:10px;align-items:flex-start;padding:11px 14px;border-radius:14px;font-size:.94rem;
   margin:2px 0 10px;line-height:1.45;}
 .fb.ok{background:var(--ok-soft);color:#065f46;border:1px solid #a7f3d0;}
@@ -153,10 +163,11 @@ button[data-testid="stBaseButton-primaryFormSubmit"]:hover{transform:translateY(
   color:var(--brand);font-size:.75rem;}
 .step i{color:#cbd5e1;font-style:normal;}
 .pz-q{font-size:1.18rem;font-weight:650;color:var(--ink);line-height:1.45;margin:10px 0 6px;}
-.st-key-card_pz label[data-baseweb="radio"]{border:1px solid var(--line);border-radius:12px;padding:11px 14px;
-  margin:0 0 8px;width:100%;background:#fff;transition:all .12s;}
-.st-key-card_pz label[data-baseweb="radio"]:hover{border-color:#c7d2fe;background:#fafaff;}
-.st-key-card_pz label[data-baseweb="radio"]:has(input:checked){border-color:var(--brand);background:var(--brand-soft);}
+.st-key-card_pz [data-testid="stRadioGroup"], .st-key-card_pz [data-testid="stRadioGroup"] > div{width:100%;gap:0;}
+.st-key-card_pz label[data-testid="stRadioOption"]{border:1px solid var(--line);border-radius:12px;padding:11px 14px;
+  margin:0 0 8px;width:100%;background:#fff;transition:all .12s;cursor:pointer;}
+.st-key-card_pz label[data-testid="stRadioOption"]:hover{border-color:#c7d2fe;background:#fafaff;}
+.st-key-card_pz label[data-testid="stRadioOption"][data-selected="true"]{border-color:var(--brand);background:var(--brand-soft);}
 .digit{display:inline-grid;place-items:center;width:2.05em;height:2.4em;font-family:'JetBrains Mono',monospace;
   font-size:1.3rem;font-weight:700;border-radius:10px;margin:3px;}
 .d-ok{background:var(--ok-soft);color:#047857;border:1px solid #a7f3d0;}
@@ -332,7 +343,8 @@ def auth_forms(prefix):
 
 
 # ================================================================ top bar
-bar_l, bar_r = st.columns([3, 1.25], vertical_alignment="center")
+topbar = st.container(key="topbar")
+bar_l, bar_r = topbar.columns([3, 1.25], vertical_alignment="center")
 with bar_l:
     H('<div class="brand"><div class="logo">🧠</div><div>MindGym<small>Mental maths &amp; memory trainer</small></div></div>')
 with bar_r:
@@ -817,7 +829,9 @@ def show_mem_result():
       f'<div class="big">{big}</div><div class="line">{line}</div>'
       f'<div class="stats"><div><b>{ss.mem_len}</b>next length</div>{extra}</div></div>')
     chips = "".join(f'<span class="digit {"d-ok" if ok else "d-bad"}">{ch}</span>' for ch, ok in r["marks"])
-    H(f'<div style="margin:-4px 0 16px">{chips}</div>')
+    H('<div class="muted" style="margin:-4px 0 4px">Expected answer · '
+      '<span style="color:#047857;font-weight:600">green</span> = you got that position right</div>'
+      f'<div style="margin:0 0 16px">{chips}</div>')
 
 
 # ================================================================ PROGRESS

@@ -10,6 +10,7 @@ import streamlit.components.v1 as components
 import analytics as A
 import growth as G
 import logic as L
+import puzzles as PZ
 from db import Store
 
 st.set_page_config(page_title="MindGym", page_icon="🧠", layout="centered")
@@ -130,7 +131,8 @@ with st.sidebar:
                             for m in ss.mem_history:
                                 store.add_memory(user["id"], m["length"], m["direction"], m["style"],
                                                  m["correct"], m["digits_right"], m.get("target"),
-                                                 m.get("attempt"))
+                                                 m.get("attempt"), m.get("distract", 0),
+                                                 m.get("puzzles_right", 0), m.get("hold_seconds"))
                             st.rerun()
         st.caption("Playing as guest — progress is lost when you close the tab.")
 
@@ -311,7 +313,8 @@ def show_summary():
 # ================================================================ MEMORY
 def memory_page():
     st.header("🧩 Memory — Digit Span")
-    st.caption("A string of digits appears for a few seconds. Memorise it, then type it back.")
+    st.caption("A string of digits appears for a few seconds. Memorise it, then type it back — "
+               "optionally after a few puzzles designed to knock it out of your head.")
 
     if ss.mem_phase == "idle":
         c1, c2 = st.columns(2)
@@ -331,13 +334,19 @@ def memory_page():
         else:
             speed = st.slider("Seconds each digit is shown", 0.4, 2.0, 1.0, 0.1)
         chunked = st.checkbox("Group digits in 3s (chunking)", value=True, disabled=style == "One by one")
+        c5, c6 = st.columns(2)
+        n_distract = c5.select_slider("Distraction before recall", [0, 1, 2, 3, 4, 5, 7, 10], value=5,
+                                      format_func=lambda n: "None" if n == 0 else f"{n} puzzles",
+                                      help="Answer quick probability / finance / brain-teaser questions "
+                                           "before you're asked for the digits")
+        topic = c6.selectbox("Puzzle type", PZ.TOPICS, disabled=n_distract == 0)
 
         if ss.mem_result:
             show_mem_result()
 
         if st.button("▶  Show me the digits", type="primary", use_container_width=True):
             ss.mem_cfg = dict(length_mode=length_mode, style=style, direction=direction,
-                              speed=speed, chunked=chunked)
+                              speed=speed, chunked=chunked, n_distract=n_distract, topic=topic)
             ss.mem_seq = L.make_sequence(ss.mem_len)
             ss.mem_result = None
             ss.mem_phase = "show"
@@ -370,11 +379,50 @@ def memory_page():
                 box.markdown('<div class="mem-card">&nbsp;<div class="q-sub">&nbsp;</div></div>',
                              unsafe_allow_html=True)
                 time.sleep(0.12)
-        ss.mem_phase = "recall"
         ss.mem_shown_at = time.time()
+        if cfg.get("n_distract"):
+            ss.pz = PZ.pick(cfg["n_distract"], cfg.get("topic", "Mixed"))
+            ss.pz_i, ss.pz_right, ss.pz_fb = 0, 0, None
+            ss.mem_phase = "distract"
+        else:
+            ss.pz, ss.pz_right = [], 0
+            ss.mem_phase = "recall"
         st.rerun()
 
+    if ss.mem_phase == "distract":
+        n = len(ss.pz)
+        st.markdown(f'<div class="mem-card" style="background:#f1f5f9;color:#94a3b8;font-size:1.6rem">'
+                    f'🔒 {len(seq)} digits hidden — keep them in your head</div>', unsafe_allow_html=True)
+        st.progress(ss.pz_i / n, text=f"Puzzle {ss.pz_i + 1} of {n} · {ss.pz_right} correct so far")
+        if ss.pz_fb:
+            ok, msg = ss.pz_fb
+            st.markdown(f'<div class="{"fb-ok" if ok else "fb-bad"}">{msg}</div>', unsafe_allow_html=True)
+        p = ss.pz[ss.pz_i]
+        with st.form(f"pz_{ss.pz_i}"):
+            st.caption(p["topic"].upper())
+            st.markdown(f"#### {p['q']}")
+            choice = st.radio("Answer", p["options"], index=None, label_visibility="collapsed")
+            go = st.form_submit_button("Answer ↵", type="primary", use_container_width=True)
+        if go:
+            if choice is None:
+                ss.pz_fb = (False, "Pick an option first.")
+                st.rerun()
+            ok = choice == p["answer"]
+            ss.pz_right += ok
+            ss.pz_fb = (ok, ("✅ Correct. " if ok else f"❌ Answer: <b>{p['answer']}</b>. ") + p["why"])
+            ss.pz_i += 1
+            if ss.pz_i >= n:
+                ss.mem_phase = "recall"
+            st.rerun()
+        return
+
     if ss.mem_phase == "recall":
+        if cfg.get("n_distract"):
+            if ss.get("pz_fb"):
+                ok, msg = ss.pz_fb
+                st.markdown(f'<div class="{"fb-ok" if ok else "fb-bad"}">{msg}</div>', unsafe_allow_html=True)
+            st.info(f"Puzzles done: **{ss.pz_right}/{len(ss.pz)}** correct. "
+                    f"Now — **what was the string?**")
         st.markdown(f'<div class="mem-card" style="background:#f1f5f9;color:#94a3b8">'
                     f'{"•" * len(seq)}</div>', unsafe_allow_html=True)
         label = f"Type the {len(seq)} digits" + (" **in reverse order**" if cfg["direction"] == "Backward" else "")
@@ -387,14 +435,19 @@ def memory_page():
             target = seq[::-1] if cfg["direction"] == "Backward" else seq
             n_ok, marks, clean = L.compare_sequence(target, attempt)
             correct = clean == target
+            hold = round(time.time() - ss.get("mem_shown_at", time.time()), 1)
+            nd = len(ss.get("pz") or []) if cfg.get("n_distract") else 0
+            pr = ss.get("pz_right", 0) if nd else 0
             ss.mem_history.append(dict(time=pd.Timestamp.now(), length=len(seq), direction=cfg["direction"],
                                        style=cfg["style"], correct=correct,
-                                       digits_right=n_ok, sequence=seq, target=target, attempt=clean))
+                                       digits_right=n_ok, sequence=seq, target=target, attempt=clean,
+                                       distract=nd, puzzles_right=pr, hold_seconds=hold))
             if ss.user:
                 store.add_memory(ss.user["id"], len(seq), cfg["direction"], cfg["style"], correct, n_ok,
-                                 target, clean)
+                                 target, clean, nd, pr, hold)
             ss.mem_result = dict(correct=correct, marks=marks, target=target, attempt=clean,
-                                 n_ok=n_ok, length=len(seq))
+                                 n_ok=n_ok, length=len(seq), distract=nd, puzzles_right=pr, hold=hold)
+            ss.pz_fb = None
             if cfg["length_mode"] == "Adaptive":
                 ss.mem_len = L.next_adaptive_length(ss.mem_len, correct)
             ss.mem_phase = "idle"
@@ -408,6 +461,9 @@ def show_mem_result():
     else:
         st.markdown(f'<div class="fb-bad">❌ {r["n_ok"]}/{r["length"]} digits in the right place. '
                     f'You typed: <code>{r["attempt"] or "—"}</code></div>', unsafe_allow_html=True)
+    if r.get("distract"):
+        st.caption(f"After {r['distract']} puzzles ({r['puzzles_right']}/{r['distract']} correct) · "
+                   f"held in memory for {r['hold']:.0f}s")
     html = "".join(f'<span class="digit {"d-ok" if ok else "d-bad"}">{ch}</span>' for ch, ok in r["marks"])
     st.markdown(f"<div style='margin:10px 0 16px'>{html}</div>", unsafe_allow_html=True)
 
@@ -678,6 +734,14 @@ def growth_page():
                     st.bar_chart(pc, height=200)
                 else:
                     st.caption("Shows up after a few more memory rounds.")
+            de = A.distraction_effect(mem)
+            if len(de):
+                st.markdown("##### Effect of distraction")
+                st.caption("How well the digits survive when you solve puzzles before recalling them. "
+                           "**Avg hold** = seconds between the digits disappearing and you typing them back.")
+                st.dataframe(de, hide_index=True, use_container_width=True)
+                if len(de) >= 2:
+                    st.bar_chart(de.set_index("Condition")["Digit accuracy %"], height=180)
             st.markdown("##### By display mode")
             st.dataframe(A.memory_by_mode(mem), hide_index=True, use_container_width=True)
         else:

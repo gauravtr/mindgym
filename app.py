@@ -163,7 +163,10 @@ button[data-testid="stBaseButton-primaryFormSubmit"]:hover{transform:translateY(
   color:var(--brand);font-size:.75rem;}
 .step i{color:#cbd5e1;font-style:normal;}
 .pz-q{font-size:1.18rem;font-weight:650;color:var(--ink);line-height:1.45;margin:10px 0 6px;}
-.st-key-card_pz [data-testid="stRadioGroup"], .st-key-card_pz [data-testid="stRadioGroup"] > div{width:100%;gap:0;}
+.st-key-card_pz [data-testid="stElementContainer"]:has([data-testid="stRadio"]),
+.st-key-card_pz [data-testid="stRadio"]{width:100%!important;}
+.st-key-card_pz [data-testid="stRadioGroup"]{width:100%;align-items:stretch;}
+.st-key-card_pz [data-testid="stRadioGroup"] > div{width:100%;flex-direction:column;gap:0;}
 .st-key-card_pz label[data-testid="stRadioOption"]{border:1px solid var(--line);border-radius:12px;padding:11px 14px;
   margin:0 0 8px;width:100%;background:#fff;transition:all .12s;cursor:pointer;}
 .st-key-card_pz label[data-testid="stRadioOption"]:hover{border-color:#c7d2fe;background:#fafaff;}
